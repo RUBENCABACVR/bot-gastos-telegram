@@ -1,19 +1,21 @@
 # -----------------------------------------------------------------------------
-# BOT DE GASTOS PARA TELEGRAM (VERSIÓN FINAL PARA VERCELL)
+# BOT DE GASTOS PARA TELEGRAM (VERSIÓN CORREGIDA PARA VERCELL)
 #
-# Funcionalidad:
-# 1.  Se conecta a Telegram.
-# 2.  Permite registrar gastos mediante un menú de botones.
-# 3.  Se conecta de forma segura a Google Sheets usando una Cuenta de Servicio.
-# 4.  Guarda cada gasto en una nueva fila en la hoja de cálculo.
+# Corrección:
+# 1.  Se reestructura el final del código para exponer una variable `app`.
+#     Vercel busca esta variable para manejar las peticiones web.
+# 2.  Se adapta la inicialización para que funcione en un entorno "serverless",
+#     donde el bot se inicia y se apaga con cada mensaje.
 # -----------------------------------------------------------------------------
 
 import logging
 import os
 import gspread
+import json
+import asyncio
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # --- Configuración Inicial ---
@@ -23,11 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Tu token de Telegram (lo leeremos de las variables de entorno de Vercel)
-TOKEN = os.environ.get('TELEGRAM_TOKEN', 'TU_TOKEN_DE_TELEGRAM')
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
+GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 
 # --- Conexión a Google Sheets ---
-# Define los "scopes" o permisos que necesita nuestro bot
 SCOPE = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -35,43 +36,29 @@ SCOPE = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-# Vercel no puede leer un archivo JSON directamente de la forma tradicional.
-# En su lugar, copiaremos el contenido del archivo JSON a una variable de entorno.
-# Aquí, intentamos leer esa variable de entorno.
-GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-
-# Función para autorizar y conectarse a Google Sheets
 def conectar_a_sheets():
-    """Se conecta a la API de Google Sheets usando las credenciales."""
     try:
         if GOOGLE_CREDENTIALS_JSON:
-            import json
-            # Carga las credenciales desde la variable de entorno
             creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        else:
-            # Si no está en Vercel, busca el archivo localmente (para pruebas)
-            creds = ServiceAccountCredentials.from_json_keyfile_name("credenciales.json", SCOPE)
-        
-        client = gspread.authorize(creds)
-        # Abre la hoja de cálculo por su nombre y selecciona la primera hoja
-        sheet = client.open("Mis Gastos Personales").sheet1
-        return sheet
+            client = gspread.authorize(creds)
+            sheet = client.open("Mis Gastos Personales").sheet1
+            return sheet
+        logger.error("Variable de entorno GOOGLE_CREDENTIALS_JSON no encontrada.")
+        return None
     except Exception as e:
         logger.error(f"Error al conectar con Google Sheets: {e}")
         return None
 
 def guardar_gasto_en_sheets(user_id, categoria, monto, descripcion):
-    """Añade una nueva fila a la hoja de cálculo con los datos del gasto."""
     sheet = conectar_a_sheets()
     if sheet:
         try:
             now = datetime.now()
-            # Formatea los datos para la nueva fila
             fila = [
                 str(user_id),
-                now.strftime('%Y-%m-%d %H:%M:%S'), # Timestamp
-                now.strftime('%Y-%m-%d'), # Fecha
+                now.strftime('%Y-%m-%d %H:%M:%S'),
+                now.strftime('%Y-%m-%d'),
                 monto,
                 categoria.capitalize(),
                 descripcion
@@ -84,7 +71,6 @@ def guardar_gasto_en_sheets(user_id, categoria, monto, descripcion):
             return False
     return False
 
-# Categorías de gastos con emojis
 CATEGORIAS = {
     'alimentacion': '🥦 Alimentación',
     'vivienda': '🏠 Vivienda',
@@ -107,6 +93,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(mensaje)
 
 async def nuevo_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (El código de esta función y las siguientes no cambia, se omite por brevedad)
+    # ... (pega aquí el resto de las funciones: nuevo_gasto, seleccionar_categoria, etc.)
+    # ...
+    # ¡Asegúrate de copiar el resto de las funciones del bot del código anterior!
+    # Por ejemplo:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     keyboard = []
     row = []
     for key, value in CATEGORIAS.items():
@@ -118,6 +110,7 @@ async def nuevo_gasto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         keyboard.append(row)
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🛒 Por favor, selecciona una categoría:", reply_markup=reply_markup)
+
 
 async def seleccionar_categoria(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -144,8 +137,6 @@ async def procesar_mensaje_gasto(update: Update, context: ContextTypes.DEFAULT_T
         categoria = context.user_data['categoria']
         user_id = update.effective_user.id
         
-        # --- ¡AQUÍ OCURRE LA MAGIA! ---
-        # Llamamos a la función para guardar los datos en la hoja de cálculo
         exito = guardar_gasto_en_sheets(user_id, categoria, monto, descripcion)
         
         if exito:
@@ -156,7 +147,7 @@ async def procesar_mensaje_gasto(update: Update, context: ContextTypes.DEFAULT_T
                 f"**Descripción:** {descripcion}"
             )
         else:
-            respuesta = "❌ Hubo un error al intentar guardar el gasto en la base de datos. Por favor, intenta de nuevo."
+            respuesta = "❌ Hubo un error al guardar el gasto. Revisa los logs de Vercel."
             
         await update.message.reply_text(respuesta)
         context.user_data.clear()
@@ -168,17 +159,24 @@ async def procesar_mensaje_gasto(update: Update, context: ContextTypes.DEFAULT_T
             "Ejemplo: `120 Pasajes de micro`"
         )
 
-# --- Esta parte es solo para pruebas locales ---
-def main():
-    print("Iniciando bot para pruebas locales...")
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("gasto", nuevo_gasto))
-    application.add_handler(CallbackQueryHandler(seleccionar_categoria, pattern='^categoria_'))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje_gasto))
-    application.run_polling()
 
-if __name__ == '__main__':
-    # Antes de ejecutar localmente, asegúrate de tener tu archivo "credenciales.json"
-    # y tu TOKEN de telegram en las variables de entorno o directamente en el código.
-    main()
+# --- Punto de Entrada para Vercel ---
+# Vercel necesita una variable 'app' que pueda manejar las peticiones web.
+# Creamos la aplicación de Telegram aquí.
+application = Application.builder().token(TOKEN).build()
+
+# Añadimos los manejadores de comandos y mensajes
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("gasto", nuevo_gasto))
+application.add_handler(CallbackQueryHandler(seleccionar_categoria, pattern='^categoria_'))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje_gasto))
+
+# Esta es la función principal que Vercel ejecutará
+async def app(request):
+    """Maneja las peticiones webhook de Telegram."""
+    # Vercel pasa la petición web como un objeto. Necesitamos el cuerpo (body).
+    body = await request.json()
+    update = Update.de_json(body, application.bot)
+    await application.process_update(update)
+    # Devolvemos una respuesta vacía para decirle a Telegram "OK, recibido".
+    return ('', 204)
